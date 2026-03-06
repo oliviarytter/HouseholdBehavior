@@ -35,9 +35,11 @@ class DynLaborFertModelClass(EconModelClass):
         par.alpha = 0.1 # human capital accumulation 
         par.w = 1.0 # wage base level
         par.tau = 0.1 # labor income tax
+        par.y_spouse = 0.0  # spouse income (0 = baseline)
 
         # children
         par.p_birth = 0.1
+        par.theta = 0.0  # childcare cost (0 = baseline)
 
         # saving
         par.r = 0.02 # interest rate
@@ -195,8 +197,8 @@ class DynLaborFertModelClass(EconModelClass):
         util = self.util(cons,hours,kids)
         
         # d. *expected* continuation value from savings
-        income = self.wage_func(capital,t) * hours
-        a_next = (1.0+par.r)*(assets + income - cons)
+        income = self.wage_func(capital,t) * hours + par.y_spouse * (0.1 + 0.01*t)
+        a_next = (1.0+par.r)*(assets + income - cons - par.theta*(kids>0))
         k_next = capital + hours
 
         # no birth
@@ -259,8 +261,8 @@ class DynLaborFertModelClass(EconModelClass):
 
                 # iii. store next-period states
                 if t<par.simT-1:
-                    income = self.wage_func(sim.k[i,t],t)*sim.h[i,t]
-                    sim.a[i,t+1] = (1+par.r)*(sim.a[i,t] + income - sim.c[i,t])
+                    income = self.wage_func(sim.k[i,t],t)*sim.h[i,t] + par.y_spouse * (0.1 + 0.01*t)
+                    sim.a[i,t+1] = (1+par.r)*(sim.a[i,t] + income - sim.c[i,t] - par.theta*(sim.n[i,t]>0))
                     sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]
 
                     birth = 0 
