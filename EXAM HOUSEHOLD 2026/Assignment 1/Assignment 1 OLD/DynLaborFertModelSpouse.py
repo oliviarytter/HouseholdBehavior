@@ -22,27 +22,25 @@ class DynLaborFertModelClass(EconModelClass):
         par = self.par
 
         par.T = 10 # time periods
-
+        
         # preferences
         par.rho = 0.98 # discount factor
 
         par.beta_0 = 0.1 # weight on labor dis-utility (constant)
         par.beta_1 = 0.05 # additional weight on labor dis-utility (children)
         par.eta = -2.0 # CRRA coefficient
-        par.gamma = 2.5 # curvature on labor hours
+        par.gamma = 2.5 # curvature on labor hours 
+        par.p_spouse = 0.8  # probability of spouse being present
 
         # income
-        par.alpha = 0.1 # human capital accumulation
+        par.alpha = 0.1 # human capital accumulation 
         par.w = 1.0 # wage base level
         par.tau = 0.1 # labor income tax
-        par.y_spouse = 0.0  # spouse income level (0 = baseline, no spouse income)
+        par.y_spouse = 0.0  # spouse income (0 = baseline)
 
         # children
         par.p_birth = 0.1
-        par.theta = 0.0  # childcare cost in presence of a child (0 = baseline)
-
-        # spouse
-        par.p_spouse = 1.0  # probability that a spouse is present (1 = baseline: always present)
+        par.theta = 0.0  # childcare cost (0 = baseline)
 
         # saving
         par.r = 0.02 # interest rate
@@ -50,10 +48,10 @@ class DynLaborFertModelClass(EconModelClass):
         # grids
         par.a_max = 5.0 # maximum point in wealth grid
         par.a_min = -10.0 # minimum point in wealth grid
-        par.Na = 70 # number of grid points in wealth grid
-
+        par.Na = 70 # number of grid points in wealth grid 
+        
         par.k_max = 20.0 # maximum point in wealth grid
-        par.Nk = 30 # number of grid points in wealth grid
+        par.Nk = 30 # number of grid points in wealth grid    
 
         par.Nn = 2 # number of children
 
@@ -71,7 +69,7 @@ class DynLaborFertModelClass(EconModelClass):
         sim = self.sim
 
         par.simT = par.T
-
+        
         # a. asset grid
         par.a_grid = nonlinspace(par.a_min,par.a_max,par.Na,1.1)
 
@@ -81,8 +79,8 @@ class DynLaborFertModelClass(EconModelClass):
         # c. number of children grid
         par.n_grid = np.arange(par.Nn)
 
-        # d. solution arrays. Last dimension (size 2) is the spouse state: absent (0) / present (1)
-        shape = (par.T,par.Nn,par.Na,par.Nk,2)
+        # d. solution arrays
+        shape = (par.T, par.Nn, par.Na, par.Nk, 2)  # 2 for spouse present/absent
         sol.c = np.nan + np.zeros(shape)
         sol.h = np.nan + np.zeros(shape)
         sol.V = np.nan + np.zeros(shape)
@@ -94,13 +92,10 @@ class DynLaborFertModelClass(EconModelClass):
         sim.a = np.nan + np.zeros(shape)
         sim.k = np.nan + np.zeros(shape)
         sim.n = np.zeros(shape,dtype=np.int_)
-        sim.s = np.zeros(shape,dtype=np.int_) # spouse present (1) or absent (0)
 
-        # f. draws used to simulate child arrival and spouse presence.
-        #    Drawn once with a fixed seed so simulations are reproducible across runs.
+        # f. draws used to simulate child arrival
         np.random.seed(9210)
-        sim.draws_uniform = np.random.uniform(size=shape) # child arrival
-        sim.draws_spouse  = np.random.uniform(size=shape) # spouse presence
+        sim.draws_uniform = np.random.uniform(size=shape)
 
         # g. initialization
         sim.a_init = np.zeros(par.simN)
@@ -114,60 +109,33 @@ class DynLaborFertModelClass(EconModelClass):
     ############
     # Solution #
     def solve(self):
-
-        # a. unpack
         par = self.par
         sol = self.sol
-
-        # b. solve last period
-
-        # c. loop backwards (over all periods)
+        
         for t in reversed(range(par.T)):
-
-            # i. loop over state variables: number of children, human capital and wealth in beginning of period
             for i_n,kids in enumerate(par.n_grid):
                 for i_a,assets in enumerate(par.a_grid):
                     for i_k,capital in enumerate(par.k_grid):
-                        for i_s,spouse in enumerate([0,1]): # spouse absent (0) / present (1)
+                        for i_s,spouse in enumerate([0,1]):
+                            
                             idx = (t,i_n,i_a,i_k,i_s)
-
-                            # ii. find optimal consumption and hours at this level of wealth in this period t.
-
-                            if t==par.T-1: # last period
-
+                            
+                            if t==par.T-1:
                                 obj = lambda x: self.obj_last(x[0],assets,capital,kids)
-
-                                # call optimizer
-                                hours_min = np.fmax( - assets / self.wage_func(capital,t) + 1.0e-5 , 0.0) # minimum amount of hours that ensures positive consumption
+                                hours_min = np.fmax(-assets/self.wage_func(capital,t)+1.0e-5, 0.0)
                                 init_h = np.maximum(hours_min,2.0) if i_a==0 else np.array([sol.h[t,i_n,i_a-1,i_k,i_s]])
                                 res = minimize(obj,init_h,bounds=((hours_min,np.inf),),method='L-BFGS-B')
-
-                                # store results
                                 sol.c[idx] = self.cons_last(res.x[0],assets,capital)
                                 sol.h[idx] = res.x[0]
                                 sol.V[idx] = -res.fun
 
                             else:
-
-                                # objective function: negative since we minimize
-                                obj = lambda x: - self.value_of_choice(x[1],x[0],assets,capital,kids,t,spouse)
-
-                                # bounds on consumption
-                                lb_c = 0.000001 # avoid dividing with zero
-                                ub_c = np.inf
-
-                                # bounds on hours
-                                lb_h = 0.0
-                                ub_h = np.inf
-
-                                bounds = ((lb_h,ub_h),(lb_c,ub_c))
-
-                                # call optimizer
+                                obj = lambda x: -self.value_of_choice(x[1],x[0],assets,capital,kids,t,spouse)
+                                lb_c = 0.000001
+                                bounds = ((0.0,np.inf),(lb_c,np.inf))
                                 idx_last = (t+1,i_n,i_a,i_k,i_s)
                                 init = np.array([sol.h[idx_last],sol.c[idx_last]])
                                 res = minimize(obj,init,bounds=bounds,method='L-BFGS-B',tol=1.0e-8)
-
-                                # store results
                                 sol.h[idx] = res.x[0]
                                 sol.c[idx] = res.x[1]
                                 sol.V[idx] = -res.fun
@@ -182,7 +150,7 @@ class DynLaborFertModelClass(EconModelClass):
 
     def obj_last(self,hours,assets,capital,kids):
         cons = self.cons_last(hours,assets,capital)
-        return - self.util(cons,hours,kids)
+        return - self.util(cons,hours,kids)    
 
     # earlier periods
     def value_of_choice(self,cons,hours,assets,capital,kids,t,spouse):
@@ -191,7 +159,7 @@ class DynLaborFertModelClass(EconModelClass):
         par = self.par
         sol = self.sol
 
-        # b. penalty for violating bounds.
+        # b. penalty for violating bounds. 
         penalty = 0.0
         if cons < 0.0:
             penalty += cons*1_000.0
@@ -202,37 +170,26 @@ class DynLaborFertModelClass(EconModelClass):
 
         # c. utility from consumption
         util = self.util(cons,hours,kids)
-
-        # d. *expected* continuation value from savings.
-        #    The spouse income y_t = y_spouse*(0.1+0.01*t) only enters when a spouse is present (spouse=1).
+        
+        # d. *expected* continuation value from savings
         income = self.wage_func(capital,t) * hours + spouse * par.y_spouse * (0.1 + 0.01*t)
         a_next = (1.0+par.r)*(assets + income - cons - par.theta*(kids>0))
         k_next = capital + hours
 
-        # a child can only arrive next period if a spouse is present this period
-        p_birth_eff = par.p_birth if spouse==1 else 0.0
+        # no birth
+        kids_next = kids
+        
+        p_birth_eff = par.p_birth if spouse == 1 else 0.0
 
-        # expectation over (i) next-period spouse presence s' and (ii) child arrival.
-        # s' is drawn independently: present with prob p_spouse, absent with prob 1-p_spouse.
         EV_next = 0.0
-        for s_next, p_s_next in [(1, par.p_spouse), (0, 1.0-par.p_spouse)]:
-
-            # no birth
-            kids_next = kids
-            V_next_no = sol.V[t+1,kids_next,:,:,s_next]
-            V_next_no_interp = interp_2d(par.a_grid,par.k_grid,V_next_no,a_next,k_next)
-
-            # birth
-            if (kids>=(par.Nn-1)):
-                # cannot have more children
-                V_next_birth_interp = V_next_no_interp
-
+        for s_next, p_s_next in [(1, par.p_spouse), (0, 1-par.p_spouse)]:
+            V_no = interp_2d(par.a_grid, par.k_grid, sol.V[t+1, kids_next, :, :, s_next], a_next, k_next)
+            if kids >= par.Nn-1:
+                V_birth = V_no
+                
             else:
-                kids_next = kids + 1
-                V_next = sol.V[t+1,kids_next,:,:,s_next]
-                V_next_birth_interp = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next)
-
-            EV_next += p_s_next * (p_birth_eff * V_next_birth_interp + (1.0-p_birth_eff)*V_next_no_interp)
+                V_birth = interp_2d(par.a_grid, par.k_grid, sol.V[t+1, kids+1, :, :, s_next], a_next, k_next)
+            EV_next += p_s_next * (p_birth_eff * V_birth + (1-p_birth_eff) * V_no)
 
         # e. return value of choice (including penalty)
         return util + par.rho*EV_next + penalty
@@ -243,7 +200,7 @@ class DynLaborFertModelClass(EconModelClass):
 
         beta = par.beta_0 + par.beta_1*kids
 
-        return (c)**(1.0+par.eta) / (1.0+par.eta) - beta*(hours)**(1.0+par.gamma) / (1.0+par.gamma)
+        return (c)**(1.0+par.eta) / (1.0+par.eta) - beta*(hours)**(1.0+par.gamma) / (1.0+par.gamma) 
 
     def wage_func(self,capital,t):
         # after tax wage rate
@@ -270,14 +227,10 @@ class DynLaborFertModelClass(EconModelClass):
 
             for t in range(par.simT):
 
-                # spouse present this period (uses the fixed seeded draw, not a fresh random number)
-                s_t = 1 if sim.draws_spouse[i,t] <= par.p_spouse else 0
-                sim.s[i,t] = s_t
-
-                # ii. interpolate optimal consumption and hours on the spouse-state slice
-                idx_sol = (t,sim.n[i,t])
-                sim.c[i,t] = interp_2d(par.a_grid,par.k_grid,sol.c[idx_sol][:,:,s_t],sim.a[i,t],sim.k[i,t])
-                sim.h[i,t] = interp_2d(par.a_grid,par.k_grid,sol.h[idx_sol][:,:,s_t],sim.a[i,t],sim.k[i,t])
+                # ii. interpolate optimal consumption and hours
+                s_t = 1 if np.random.uniform() <= par.p_spouse else 0
+                sim.c[i,t] = interp_2d(par.a_grid,par.k_grid,sol.c[t,sim.n[i,t],:,:,s_t],sim.a[i,t],sim.k[i,t])
+                sim.h[i,t] = interp_2d(par.a_grid,par.k_grid,sol.h[t,sim.n[i,t],:,:,s_t],sim.a[i,t],sim.k[i,t])
 
                 # iii. store next-period states
                 if t<par.simT-1:
@@ -285,8 +238,10 @@ class DynLaborFertModelClass(EconModelClass):
                     sim.a[i,t+1] = (1+par.r)*(sim.a[i,t] + income - sim.c[i,t] - par.theta*(sim.n[i,t]>0))
                     sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]
 
-                    # a child can only arrive if a spouse is present this period
-                    birth = 0
-                    if ((s_t==1) & (sim.draws_uniform[i,t] <= par.p_birth) & (sim.n[i,t]<(par.Nn-1))):
+                    birth = 0 
+                    if s_t == 1 and sim.draws_uniform[i,t] <= par.p_birth and sim.n[i,t] < (par.Nn-1):
                         birth = 1
                     sim.n[i,t+1] = sim.n[i,t] + birth
+                    
+
+
