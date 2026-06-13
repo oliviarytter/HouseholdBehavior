@@ -34,6 +34,10 @@ class DynLaborModelClass(EconModelClass):
         par.alpha = 0.1 # human capital accumulation 
         par.w = 1.0 # wage base level
         par.tau = 0.12 # labor income tax
+        par.tau_a = 0.0 # tax on wealth 
+        # human capital depreciation shock
+        par.delta = 0.2   # size of depreciation (20%)
+        par.pk    = 0.6   # probability that depreciation occurs
 
         # saving
         par.r = 0.03 # interest rate
@@ -49,6 +53,7 @@ class DynLaborModelClass(EconModelClass):
         # simulation
         par.simT = par.T # number of periods
         par.simN = 1_000 # number of individuals
+
 
 
     def allocate(self):
@@ -86,6 +91,9 @@ class DynLaborModelClass(EconModelClass):
         np.random.seed(3500)
         sim.a_init = np.fmax(0.0 , np.random.normal(size=par.simN))
         sim.k_init = np.fmax(0.0 , 0.5*np.random.normal(size=par.simN))
+
+        # depreciation shocks: True where human capital depreciates this period
+        sim.delta_shock = np.random.uniform(size=(par.simN,par.simT)) < par.pk
 
 
 
@@ -147,8 +155,10 @@ class DynLaborModelClass(EconModelClass):
 
     # last period
     def cons_last(self,hours,assets,capital):
+        par = self.par
         income = self.wage_func(capital) * hours
-        cons = assets + income
+        wealth_tax_rate = par.tau_a * (assets > 0.0)
+        cons = (1.0-wealth_tax_rate)*assets + income
         return cons
 
     def obj_last(self,hours,assets,capital):
@@ -174,14 +184,22 @@ class DynLaborModelClass(EconModelClass):
         # c. utility from consumption
         util = self.util(cons,hours)
         
-        # d. continuation value from savings
+        # d. EXPECTED continuation value over the human-capital depreciation shock
         V_next = sol.V[t+1]
-        a_next = self.wealth_trans(assets,capital,hours,cons)
-        k_next = capital + hours
-        V_next_interp = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next)
+        a_next = self.wealth_trans(assets,capital,hours,cons)   # wealth is deterministic
+
+        # the two possible human-capital states next period (same a_next in both)
+        k_next_no   = capital + hours                    # no depreciation
+        k_next_depr = (1.0-par.delta)*capital + hours    # depreciation
+
+        V_next_no   = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_no)
+        V_next_depr = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_depr)
+
+        # probability-weighted: E[V_{t+1}] = pk*V(depr) + (1-pk)*V(no depr)
+        EV_next = par.pk*V_next_depr + (1.0-par.pk)*V_next_no
 
         # e. return value of choice (including penalty)
-        return util + par.rho*V_next_interp + penalty
+        return util + par.rho*EV_next + penalty
 
 
     def util(self,c,hours):
@@ -201,7 +219,8 @@ class DynLaborModelClass(EconModelClass):
         par = self.par
 
         income = self.wage_func(capital) * hours
-        a_next = (1.0+par.r)*(assets + income - cons)
+        wealth_tax_rate = par.tau_a * (assets > 0.0)        # tax positive wealth only
+        a_next = (1.0+par.r)*((1.0-wealth_tax_rate)*assets + income - cons)   
 
         return a_next
 
@@ -234,6 +253,11 @@ class DynLaborModelClass(EconModelClass):
                 # iv. store next-period states
                 if t<par.simT-1:
                     sim.a[i,t+1] = self.wealth_trans(sim.a[i,t],sim.k[i,t],sim.h[i,t],sim.c[i,t])
-                    sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]
+
+                    # human capital: depreciate only if this period's shock realized
+                    if sim.delta_shock[i,t]:
+                        sim.k[i,t+1] = (1.0-par.delta)*sim.k[i,t] + sim.h[i,t]
+                    else:
+                        sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]      
 
 
