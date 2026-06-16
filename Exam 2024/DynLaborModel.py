@@ -35,9 +35,16 @@ class DynLaborModelClass(EconModelClass):
         par.w = 1.0 # wage base level
         par.tau = 0.12 # labor income tax
         par.tau_a = 0.0 # tax on wealth 
+
         # human capital depreciation shock
         par.delta = 0.2   # size of depreciation (20%)
         par.pk    = 0.6   # probability that depreciation occurs
+
+        # disability
+        par.kappa = 0.5   # wage reduction when disabled
+        par.b     = 0.2   # disability benefit
+        par.pd    = 0.1   # disability prob (doubles if already disabled)
+        par.Nd    = 2     # disability states: {0, 1}
 
         # saving
         par.r = 0.03 # interest rate
@@ -72,8 +79,9 @@ class DynLaborModelClass(EconModelClass):
         # b. human capital grid
         par.k_grid = nonlinspace(0.0,par.k_max,par.Nk,1.1)
 
-        # c. solution arrays
-        shape = (par.T,par.Na,par.Nk)
+        par.d_grid = np.arange(par.Nd)          # [0, 1]
+
+        shape = (par.T,par.Na,par.Nk,par.Nd)    # solution arrays now carry disability
         sol.c = np.nan + np.zeros(shape)
         sol.h = np.nan + np.zeros(shape)
         sol.V = np.nan + np.zeros(shape)
@@ -86,6 +94,7 @@ class DynLaborModelClass(EconModelClass):
         sim.k = np.nan + np.zeros(shape)
 
         sim.budget = np.nan + np.zeros(shape)
+        sim.util = np.nan + np.zeros(shape)
 
         # e. initialization
         np.random.seed(3500)
@@ -94,79 +103,55 @@ class DynLaborModelClass(EconModelClass):
 
         # depreciation shocks: True where human capital depreciates this period
         sim.delta_shock = np.random.uniform(size=(par.simN,par.simT)) < par.pk
+        sim.d = np.nan + np.zeros((par.simN,par.simT))                 # disability status
+        sim.disability_shock = np.random.uniform(size=(par.simN,par.simT))
 
 
 
     ############
     # Solution #
     def solve(self):
-
-        # a. unpack
         par = self.par
         sol = self.sol
-        
-        # a. loop backwards (over all periods)
-        for t in reversed(range(par.T)):
 
-            # i. loop over state variables: human capital and wealth in beginning of period
-            for i_a,assets in enumerate(par.a_grid):
-                for i_k,capital in enumerate(par.k_grid):
-                    idx = (t,i_a,i_k)
-                    idx_last = (t+1,i_a,i_k)
-                    idx_prev_asset = (t,i_a-1,i_k)
+        for t in reversed(range(par.T)):                                # unchanged
+            for i_a,assets in enumerate(par.a_grid):                    # unchanged
+                for i_k,capital in enumerate(par.k_grid):               # unchanged
+                    for i_d,disabled in enumerate(par.d_grid):          # NEW loop over disability
+                        idx            = (t,i_a,i_k,i_d)
+                        idx_last       = (t+1,i_a,i_k,i_d)
+                        idx_prev_asset = (t,i_a-1,i_k,i_d)
 
-                    # ii. find optimal consumption and hours at this level of wealth in this period t.
-                    if t==par.T-1: # last period
-                        obj = lambda x: self.obj_last(x[0],assets,capital)
-
-                        # call optimizer
-                        hours_min = np.fmax( - assets / self.wage_func(capital) + 1.0e-5 , 0.0) # minimum amount of hours that ensures positive consumption
-                        init_h = np.maximum(hours_min,2.0) if i_a==0 else np.array([sol.h[idx_prev_asset]])
-                        res = minimize(obj,init_h,bounds=((hours_min,np.inf),),method='L-BFGS-B')
-
-                        # store results
-                        sol.c[idx] = self.cons_last(res.x[0],assets,capital)
-                        sol.h[idx] = res.x[0]
-                        sol.V[idx] = self.util(sol.c[idx],sol.h[idx])
-
-                    else:
-                        
-                        # objective function: negative since we minimize
-                        obj = lambda x: - self.value_of_choice(x[0],x[1],assets,capital,t)  
-
-                        # bounds on consumption 
-                        lb_c = 0.000001 # avoid dividing with zero
-                        ub_c = np.inf
-
-                        # bounds on hours
-                        lb_h = 0.0
-                        ub_h = np.inf 
-
-                        bounds = ((lb_c,ub_c),(lb_h,ub_h))
-            
-                        # call optimizer
-                        init = np.array([sol.c[idx_last],sol.h[idx_last]])
-                        res = minimize(obj,init,bounds=bounds,method='L-BFGS-B',tol=1.0e-10) 
-                    
-                        # store results
-                        sol.c[idx] = res.x[0]
-                        sol.h[idx] = res.x[1]
-                        sol.V[idx] = -res.fun
+                        if t==par.T-1:
+                            obj = lambda x: self.obj_last(x[0],assets,capital,disabled)
+                            hours_min = np.fmax(-assets/self.wage_func(capital,disabled)+1.0e-5, 0.0)
+                            init_h = np.maximum(hours_min,2.0) if i_a==0 else np.array([sol.h[idx_prev_asset]])
+                            res = minimize(obj,init_h,bounds=((hours_min,np.inf),),method='L-BFGS-B')
+                            sol.c[idx] = self.cons_last(res.x[0],assets,capital,disabled)
+                            sol.h[idx] = res.x[0]
+                            sol.V[idx] = self.util(sol.c[idx],sol.h[idx])
+                        else:
+                            obj = lambda x: - self.value_of_choice(x[0],x[1],assets,capital,disabled,t)
+                            init = np.array([sol.c[idx_last],sol.h[idx_last]])
+                            res = minimize(obj,init,bounds=((1e-6,np.inf),(0.0,np.inf)),method='L-BFGS-B',tol=1.0e-10)
+                            sol.c[idx] = res.x[0]
+                            sol.h[idx] = res.x[1]
+                            sol.V[idx] = -res.fun
 
     # last period
-    def cons_last(self,hours,assets,capital):
+    def cons_last(self,hours,assets,capital,disabled):
         par = self.par
-        income = self.wage_func(capital) * hours
+        income = self.wage_func(capital,disabled) * hours
         wealth_tax_rate = par.tau_a * (assets > 0.0)
-        cons = (1.0-wealth_tax_rate)*assets + income
+        cons = (1.0-wealth_tax_rate)*assets + income + par.b*disabled   # +benefit in last period too
         return cons
 
-    def obj_last(self,hours,assets,capital):
-        cons = self.cons_last(hours,assets,capital)
-        return - self.util(cons,hours) 
+    def obj_last(self,hours,assets,capital,disabled):
+        cons = self.cons_last(hours,assets,capital,disabled)
+        return - self.util(cons,hours)
 
     # earlier periods
-    def value_of_choice(self,cons,hours,assets,capital,t):
+    def value_of_choice(self,cons,hours,assets,capital,disabled,t):
 
         # a. unpack
         par = self.par
@@ -185,18 +170,19 @@ class DynLaborModelClass(EconModelClass):
         util = self.util(cons,hours)
         
         # d. EXPECTED continuation value over the human-capital depreciation shock
-        V_next = sol.V[t+1]
-        a_next = self.wealth_trans(assets,capital,hours,cons)   # wealth is deterministic
+        a_next = self.wealth_trans(assets,capital,disabled,hours,cons)
+        k_next_no   = capital + hours
+        k_next_depr = (1.0-par.delta)*capital + hours
 
-        # the two possible human-capital states next period (same a_next in both)
-        k_next_no   = capital + hours                    # no depreciation
-        k_next_depr = (1.0-par.delta)*capital + hours    # depreciation
+        prob_dis = par.pd * (1.0 + disabled)   # disabled next period: pd if healthy, 2*pd if disabled
 
-        V_next_no   = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_no)
-        V_next_depr = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_depr)
-
-        # probability-weighted: E[V_{t+1}] = pk*V(depr) + (1-pk)*V(no depr)
-        EV_next = par.pk*V_next_depr + (1.0-par.pk)*V_next_no
+        # double expectation: over disability (outer) then depreciation (inner)
+        EV_next = 0.0
+        for i_d_next, prob_d in ((0, 1.0-prob_dis), (1, prob_dis)):
+            V_next = sol.V[t+1,:,:,i_d_next]                       # value slice at this disability state
+            V_no   = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_no)
+            V_depr = interp_2d(par.a_grid,par.k_grid,V_next,a_next,k_next_depr)
+            EV_next += prob_d * (par.pk*V_depr + (1.0-par.pk)*V_no)
 
         # e. return value of choice (including penalty)
         return util + par.rho*EV_next + penalty
@@ -207,21 +193,18 @@ class DynLaborModelClass(EconModelClass):
 
         return (c)**(1.0+par.eta) / (1.0+par.eta) - par.beta*(hours)**(1.0+par.gamma) / (1.0+par.gamma) 
 
-    def wage_func_before_tax(self,capital):
+    def wage_func_before_tax(self,capital,disabled):
         par = self.par
-        return par.w * (1.0 + par.alpha * capital)
+        return par.w * (1.0 + par.alpha * capital) * (1.0 - par.kappa*disabled)   # wage cut if disabled
 
-    def wage_func(self,capital):
-        # after tax wage rate
-        return (1.0 - self.par.tau )*self.wage_func_before_tax(capital)
-    
-    def wealth_trans(self,assets,capital,hours,cons):
+    def wage_func(self,capital,disabled):
+        return (1.0 - self.par.tau) * self.wage_func_before_tax(capital,disabled)
+
+    def wealth_trans(self,assets,capital,disabled,hours,cons):
         par = self.par
-
-        income = self.wage_func(capital) * hours
-        wealth_tax_rate = par.tau_a * (assets > 0.0)        # tax positive wealth only
-        a_next = (1.0+par.r)*((1.0-wealth_tax_rate)*assets + income - cons)   
-
+        income = self.wage_func(capital,disabled) * hours
+        wealth_tax_rate = par.tau_a * (assets > 0.0)
+        a_next = (1.0+par.r)*((1.0-wealth_tax_rate)*assets + income + par.b*disabled - cons)  # +benefit
         return a_next
 
     ##############
@@ -239,25 +222,32 @@ class DynLaborModelClass(EconModelClass):
             # i. initialize states
             sim.a[i,0] = sim.a_init[i]
             sim.k[i,0] = sim.k_init[i]
+            sim.d[i,0] = 0.0  
 
             for t in range(par.simT):
+                d_now = int(sim.d[i,t])                         # current disability status (0 or 1)
 
-                # ii. interpolate optimal consumption and hours
-                idx_sol = (t)
-                sim.c[i,t] = interp_2d(par.a_grid,par.k_grid,sol.c[idx_sol],sim.a[i,t],sim.k[i,t])
-                sim.h[i,t] = interp_2d(par.a_grid,par.k_grid,sol.h[idx_sol],sim.a[i,t],sim.k[i,t])
+                # policy at the current disability slice, interpolated over (a,k)
+                sim.c[i,t] = interp_2d(par.a_grid,par.k_grid,sol.c[t,:,:,d_now],sim.a[i,t],sim.k[i,t])
+                sim.h[i,t] = interp_2d(par.a_grid,par.k_grid,sol.h[t,:,:,d_now],sim.a[i,t],sim.k[i,t])
+                sim.util[i,t] = self.util(sim.c[i,t],sim.h[i,t])
 
-                # iii. save taxes 
-                sim.budget[i,t] = par.tau * self.wage_func_before_tax(sim.k[i,t])*sim.h[i,t]
+                # revenue: labour tax (disability-adjusted wage) + wealth tax - benefit paid out
+                sim.budget[i,t] = (par.tau*self.wage_func_before_tax(sim.k[i,t],d_now)*sim.h[i,t]
+                                + par.tau_a*sim.a[i,t]*(sim.a[i,t]>0.0)
+                                - par.b*d_now)
 
-                # iv. store next-period states
                 if t<par.simT-1:
-                    sim.a[i,t+1] = self.wealth_trans(sim.a[i,t],sim.k[i,t],sim.h[i,t],sim.c[i,t])
+                    sim.a[i,t+1] = self.wealth_trans(sim.a[i,t],sim.k[i,t],d_now,sim.h[i,t],sim.c[i,t])
 
-                    # human capital: depreciate only if this period's shock realized
+                    # human capital depreciation
                     if sim.delta_shock[i,t]:
                         sim.k[i,t+1] = (1.0-par.delta)*sim.k[i,t] + sim.h[i,t]
                     else:
-                        sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]      
+                        sim.k[i,t+1] = sim.k[i,t] + sim.h[i,t]
+
+                    # disability Markov draw: disabled next period if shock below the threshold
+                    prob_dis = par.pd * (1.0 + d_now)           # pd if healthy, 2*pd if disabled
+                    sim.d[i,t+1] = 1.0 if sim.disability_shock[i,t] < prob_dis else 0.0
 
 
