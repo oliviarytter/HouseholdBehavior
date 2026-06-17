@@ -28,6 +28,9 @@ class PortfolioModelClass(EconModelClass):
 
         # income
         par.y = 1.0 # income level
+
+        # tax
+        par.tau = 0.0 # capital gains tax rate
         
         # interest rates
         par.Ra = 1.01 # risk-free interest rate
@@ -91,6 +94,7 @@ class PortfolioModelClass(EconModelClass):
         sim.Rb = np.nan + np.zeros(shape)
         
         sim.resources = np.nan + np.zeros(shape)
+        sim.R = np.nan + np.zeros(shape)   # realized portfolio return rate
         
         # f. random log-normal mean one income shocks
         np.random.seed(par.seed)
@@ -232,7 +236,8 @@ class PortfolioModelClass(EconModelClass):
         par = self.par
 
         a_share = (1.0-x_share) * resources
-        a_next = par.Ra * a_share
+        Ra_net = par.Ra - par.tau*np.fmax(par.Ra-1.0,0.0)   # net-of-tax riskless return
+        a_next = Ra_net * a_share
         return a_next
 
     def b_next_func(self,resources,x_share,Rb_next):
@@ -240,7 +245,8 @@ class PortfolioModelClass(EconModelClass):
         par = self.par
 
         b_share = x_share * resources
-        b_next = Rb_next * b_share
+        Rb_net = Rb_next - par.tau*np.fmax(Rb_next-1.0,0.0)  # net-of-tax risky return
+        b_next = Rb_net * b_share
         return b_next
     
     def Rb_next_func(self,Rb,eps):
@@ -282,6 +288,8 @@ class PortfolioModelClass(EconModelClass):
                     # iv. Update next-period states
                     if t<par.simT-1:
                         sim.Rb[i,t+1] = np.fmin(par.Rb_grid[-1],self.Rb_next_func(sim.Rb[i,t],sim.eps[i,t+1]) ) # cap at maximum in grid for stability
+                        # realized portfolio return between t and t+1, stored at t+1
+                        sim.R[i,t+1] = par.Ra*(1.0-sim.x[i,t]) + sim.Rb[i,t+1]*sim.x[i,t]   
 
                         sim.a[i,t+1] = self.a_next_func(sim.resources[i,t],sim.x[i,t])  # risk-free asset
                         sim.b[i,t+1] = self.b_next_func(sim.resources[i,t],sim.x[i,t],sim.Rb[i,t+1]) # risky asset
