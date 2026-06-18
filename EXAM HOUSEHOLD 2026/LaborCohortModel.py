@@ -51,7 +51,12 @@ class LaborCohortModelClass(EconModelClass):
 
         # policy parameters
         par.tau = 0.3 # tax rate on labor income
-        par.pi_0 = 0.5 # constant in non-employment benefits
+
+        # Added in 4.b
+        par.pi_0 = 0.5 # constant in unemployment benefits
+        par.pi_1 = 0.0 # additional old-age subsidy (0 = off, recovers the Q3 model)
+        par.retire_age  = 9 # age threshold 
+        par.retire_year = 7 # year threshold 
 
         # simulation
         par.simT = par.T # number of periods
@@ -89,6 +94,10 @@ class LaborCohortModelClass(EconModelClass):
         sim.b = np.zeros(shape,dtype=int)
         sim.y = np.zeros(shape,dtype=int)
         sim.t = np.zeros(shape,dtype=int)
+        # Consumption 
+        sim.c = np.nan + np.zeros(shape)  
+        sim.G = np.zeros(shape)  
+
 
         # e. initialization and random draws for simulation
         np.random.seed(2026)
@@ -135,8 +144,8 @@ class LaborCohortModelClass(EconModelClass):
                     opt_h = res.x[0]
                     opt_val = res.fun
 
-                    # check corner solutions
-                    if self.nonemplyment_income(0.0) > 0.0: # can only be optimal to not work if there are nonemployment benefits available
+                    # check corner solutions - ALSO changed in 4.b
+                    if self.nonemplyment_income(0.0,t,self.year_func(t,cohort)) > 0.0: # can only be optimal to not work if there are nonemployment benefits available
                         obj0 = obj(np.array([0.0]))
                         if obj0 < opt_val:
                             opt_h = 0.0
@@ -201,7 +210,7 @@ class LaborCohortModelClass(EconModelClass):
         year = self.year_func(t,cohort)
         labor_income = self.wage_func(cohort,capital,year) * hours
         
-        unemployment_benefits = self.nonemplyment_income(hours)
+        unemployment_benefits = self.nonemplyment_income(hours,t,year) # pass age and year for the old-age subsidy
 
         cons = (1-par.tau)*labor_income + unemployment_benefits
         return cons
@@ -219,13 +228,6 @@ class LaborCohortModelClass(EconModelClass):
 
         return ((1.0-par.delta)*capital + hours) * shock
     
-    def nonemplyment_income(self,hours):
-        par = self.par
-        
-        pi = par.pi_0
-        return pi * (hours < 1.0e-6)
-
-    
     def aggregate_shock_func(self,year):
         par = self.par
 
@@ -233,6 +235,13 @@ class LaborCohortModelClass(EconModelClass):
     
     def year_func(self,t,cohort):
         return t + cohort
+    
+    # Adjusted in 4.b: non-employment income that depends on age and year
+    def nonemplyment_income(self,hours,t,year):
+        par = self.par
+        # benefit is pi_0 plus the old-age top-up pi_1, paid only if old enough and late enough
+        pi = par.pi_0 + par.pi_1 * (t >= par.retire_age) * (year >= par.retire_year)
+        return pi * (hours < 1.0e-6)
 
 
     ##############
@@ -260,6 +269,10 @@ class LaborCohortModelClass(EconModelClass):
                 idx_sol = (t,sim.b[i,t])
                 sim.h[i,t] = interp_1d(par.k_grid,sol.h[idx_sol],sim.k[i,t])
                 sim.h[i,t] = np.clip(sim.h[i,t],0.0,1.0) # make sure hours are between 0 and 1
+                sim.c[i,t] = self.cons_budget(sim.h[i,t],t,sim.b[i,t],sim.k[i,t])  
+                wage = self.wage_func(sim.b[i,t],sim.k[i,t],sim.y[i,t])          
+                sim.G[i,t] = par.tau*wage*sim.h[i,t] - self.nonemplyment_income(sim.h[i,t],t,sim.y[i,t])
+
 
                 # iii. store next-period states
                 if t<par.simT-1:
