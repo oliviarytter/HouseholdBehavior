@@ -48,9 +48,12 @@ class LaborCohortModelClass(EconModelClass):
         par.sigma = 0.1 # standard deviation of human capital shocks
 
         par.lambda_0 = -0.001 # constant in aggregate shock process
+        par.lambda_1 = 0.0   # recession effect on wages (0 = off)
 
         # policy parameters
         par.tau = 0.3 # tax rate on labor income
+        par.tau_1 = 0.0 # additional tax from year 8 onward (0 = off, recovers the Q4 reform)
+
 
         # Added in 4.b
         par.pi_0 = 0.5 # constant in unemployment benefits
@@ -61,6 +64,10 @@ class LaborCohortModelClass(EconModelClass):
         # simulation
         par.simT = par.T # number of periods
         par.simN = 50_000 # number of individuals
+        par.Nr = 2           # number of recession states
+        par.r_trans = np.array([[0.7,0.3],[0.6,0.4]])   # Pr(r_{t+1}|r_t)
+        par.r_sim = np.zeros(par.num_years, dtype=int)  # realized recession path by year 
+
 
 
     def allocate(self):
@@ -83,7 +90,7 @@ class LaborCohortModelClass(EconModelClass):
         par.shock_grid,par.shock_prob = log_normal_gauss_hermite(par.sigma,par.Nshock)
 
         # c. solution arrays
-        shape = (par.T,par.Nb,par.Nk)
+        shape = (par.T,par.Nb,par.Nk,par.Nr)
         sol.h = np.nan + np.zeros(shape)
         sol.V = np.nan + np.zeros(shape)
 
@@ -96,7 +103,10 @@ class LaborCohortModelClass(EconModelClass):
         sim.t = np.zeros(shape,dtype=int)
         # Consumption 
         sim.c = np.nan + np.zeros(shape)  
+        # Government budget balance
         sim.G = np.zeros(shape)  
+        # Recession state
+        sim.r = np.zeros((par.simN,par.simT),dtype=int)
 
 
         # e. initialization and random draws for simulation
@@ -115,63 +125,60 @@ class LaborCohortModelClass(EconModelClass):
         # a. unpack
         par = self.par
         sol = self.sol
-        
+
         # b. loop backwards (over all periods)
         for t in reversed(range(par.T)):
 
-            # i. loop over state variables: birth cohort and human capital
-            for cohort in par.b_grid: # cohort is integer starting in zero. Thus it is also used as index
-                for i_k,capital in enumerate(par.k_grid):
-                    idx = (t,cohort,i_k)
+            # i. loop over state variables: birth cohort, recession state, and human capital
+            for cohort in par.b_grid:
+                for r in range(par.Nr):
+                    for i_k,capital in enumerate(par.k_grid):     # <-- CHANGE 1: indented inside the r loop
+                        idx = (t,cohort,i_k,r)
 
-                    # ii. find optimal consumption and hours at this level of wealth in this period t.
+                        # ii. find optimal hours in this period
+                        if t==par.T-1: # last period
+                            obj = lambda x: - self.util(x[0],t,cohort,capital,r)
+                            init = np.array([0.5]) # initial guess for hours
 
-                    if t==par.T-1: # last period
-                        obj = lambda x: - self.util(x[0],t,cohort,capital)
+                        else:
+                            # objective function: negative since we minimize
+                            obj = lambda x: - self.value_of_choice(x[0],t,cohort,capital,r)
+                            idx_last = (t+1,cohort,i_k,r)          # <-- CHANGE 2: add r
+                            init = np.array([sol.h[idx_last]]) # next period's hours as guess
 
-                        init = np.array([0.5]) # initial guess for hours
+                        # call optimizer
+                        res = minimize(obj,init,bounds=((1.0e-6,1.0),),method='L-BFGS-B',tol=1.0e-10)
+                        opt_h = res.x[0]
+                        opt_val = res.fun
 
-                    else:
-                        
-                        # objective function: negative since we minimize
-                        obj = lambda x: - self.value_of_choice(x[0],t,cohort,capital)  
+                        # check corner solutions (nonemployment signature changed in 4b)
+                        if self.nonemplyment_income(0.0,t,self.year_func(t,cohort)) > 0.0:
+                            obj0 = obj(np.array([0.0]))
+                            if obj0 < opt_val:
+                                opt_h = 0.0
+                                opt_val = obj0
 
-                        idx_last = (t+1,cohort,i_k)
-                        init = np.array([sol.h[idx_last]]) # use next period's hours as initial guess for current period's hours
+                        obj1 = obj(np.array([1.0]))
+                        if obj1 < opt_val:
+                            opt_h = 1.0
+                            opt_val = obj1
 
-                    # call optimizer
-                    res = minimize(obj,init,bounds=((1.0e-6,1.0),),method='L-BFGS-B',tol=1.0e-10)
-                    opt_h = res.x[0]
-                    opt_val = res.fun
-
-                    # check corner solutions - ALSO changed in 4.b
-                    if self.nonemplyment_income(0.0,t,self.year_func(t,cohort)) > 0.0: # can only be optimal to not work if there are nonemployment benefits available
-                        obj0 = obj(np.array([0.0]))
-                        if obj0 < opt_val:
-                            opt_h = 0.0
-                            opt_val = obj0
-
-                    obj1 = obj(np.array([1.0]))
-                    if obj1 < opt_val:
-                        opt_h = 1.0
-                        opt_val = obj1
-
-                    # store results
-                    sol.h[idx] = opt_h
-                    sol.V[idx] = -opt_val
+                        # store results
+                        sol.h[idx] = opt_h
+                        sol.V[idx] = -opt_val
 
     
     # Utility and value of choice functions
-    def util(self,hours,t,cohort,capital):
+    def util(self, hours, t, cohort, capital, r=0):
         par = self.par
 
-        cons = self.cons_budget(hours,t,cohort,capital)
+        cons = self.cons_budget(hours, t, cohort, capital, r)
         util_cons = (cons**(1.0-par.rho))/(1.0-par.rho)
         util_labor = par.phi * hours**(1.0+par.eta) / (1.0+par.eta)
 
         return util_cons - util_labor
 
-    def value_of_choice(self,hours,t,cohort,capital):
+    def value_of_choice(self,hours,t,cohort,capital,r):
 
         # a. unpack
         par = self.par
@@ -187,40 +194,41 @@ class LaborCohortModelClass(EconModelClass):
             hours = 1.0
 
         # c. utility from consumption
-        util = self.util(hours,t,cohort,capital)
+        util = self.util(hours,t,cohort,capital,r)
         
         # d. expected continuation value from savings
-        V_next = sol.V[t+1,cohort]
         EV_next = 0.0
-        for i_shock,shock in enumerate(par.shock_grid):
+        for r_next in range(par.Nr):
+            V_next = sol.V[t+1,cohort,:,r_next]
+            for i_shock,shock in enumerate(par.shock_grid):
 
-            k_next = self.human_capital_trans(capital,hours,shock)
-            V_next_interp = interp_1d(par.k_grid,V_next,k_next)
+                k_next = self.human_capital_trans(capital,hours,shock)
+                V_next_interp = interp_1d(par.k_grid,V_next,k_next)
 
-            EV_next += par.shock_prob[i_shock] * V_next_interp
+                EV_next += par.r_trans[r,r_next] * par.shock_prob[i_shock] * V_next_interp   
 
         # e. return value of choice (including penalty)
         return util + par.beta*EV_next + penalty
 
     
     # states and budget equations
-    def cons_budget(self,hours,t,cohort,capital):
+    def cons_budget(self, hours, t, cohort, capital, r=0):
         par = self.par
 
         year = self.year_func(t,cohort)
-        labor_income = self.wage_func(cohort,capital,year) * hours
+        labor_income = self.wage_func(cohort, capital, year, r) * hours
         
         unemployment_benefits = self.nonemplyment_income(hours,t,year) # pass age and year for the old-age subsidy
 
-        cons = (1-par.tau)*labor_income + unemployment_benefits
+        cons = (1 - self.tax_rate(year))*labor_income + unemployment_benefits
         return cons
 
-    def wage_func(self,cohort,capital,year):
+    def wage_func(self, cohort, capital, year, r=0):     # <- add r=0
         par = self.par
 
         individual_wage = np.exp(par.alpha[cohort] + par.gamma * capital)
-        aggregate_shock = self.aggregate_shock_func(year)
-
+        aggregate_shock = self.aggregate_shock_func(year, r)   # <- pass r through
+        
         return individual_wage * aggregate_shock
     
     def human_capital_trans(self,capital,hours,shock):
@@ -228,13 +236,17 @@ class LaborCohortModelClass(EconModelClass):
 
         return ((1.0-par.delta)*capital + hours) * shock
     
-    def aggregate_shock_func(self,year):
+    def aggregate_shock_func(self, year, r=0):      
         par = self.par
+        return 1.0 + par.lambda_0*year + par.lambda_1*r  
 
-        return 1.0 + par.lambda_0 * year
-    
     def year_func(self,t,cohort):
         return t + cohort
+    
+    #Added in 5.a: tax rate that depends on year
+    def tax_rate(self,year):
+        par = self.par
+        return par.tau + par.tau_1 * (year >= par.retire_year)
     
     # Adjusted in 4.b: non-employment income that depends on age and year
     def nonemplyment_income(self,hours,t,year):
@@ -264,14 +276,14 @@ class LaborCohortModelClass(EconModelClass):
 
                 sim.t[i,t] = t # age
                 sim.y[i,t] = self.year_func(t,sim.b[i,t]) # year
+                sim.r[i,t] = par.r_sim[sim.y[i,t]]; r = sim.r[i,t]
 
                 # ii. interpolate optimal consumption and hours
-                idx_sol = (t,sim.b[i,t])
-                sim.h[i,t] = interp_1d(par.k_grid,sol.h[idx_sol],sim.k[i,t])
+                sim.h[i,t] = interp_1d(par.k_grid, sol.h[t,sim.b[i,t],:,r], sim.k[i,t])
                 sim.h[i,t] = np.clip(sim.h[i,t],0.0,1.0) # make sure hours are between 0 and 1
-                sim.c[i,t] = self.cons_budget(sim.h[i,t],t,sim.b[i,t],sim.k[i,t])  
-                wage = self.wage_func(sim.b[i,t],sim.k[i,t],sim.y[i,t])          
-                sim.G[i,t] = par.tau*wage*sim.h[i,t] - self.nonemplyment_income(sim.h[i,t],t,sim.y[i,t])
+                sim.c[i,t] = self.cons_budget(sim.h[i,t],t,sim.b[i,t],sim.k[i,t],r)  
+                wage       = self.wage_func(sim.b[i,t],sim.k[i,t],sim.y[i,t],r)           
+                sim.G[i,t] = self.tax_rate(sim.y[i,t])*wage*sim.h[i,t] - self.nonemplyment_income(sim.h[i,t],t,sim.y[i,t])
 
 
                 # iii. store next-period states
